@@ -36,12 +36,13 @@ export default class Table implements Plugin<PluginConfig> {
   private persistentConfig: PersistentConfig = {};
   private yasr: Yasr;
   private tableControls: Element | undefined;
+  private tableEl: HTMLTableElement | undefined;
   private dataTable: DataTables.Api | undefined;
   private tableFilterField: HTMLInputElement | undefined;
   private tableSizeField: HTMLSelectElement | undefined;
   private tableCompactSwitch: HTMLInputElement | undefined;
   private expandedCells: { [rowCol: string]: boolean | undefined } = {};
-  private tableResizer: { reset: (options: { disable: boolean }) => void } | undefined;
+  private tableResizer: { reset: (options: { disable: boolean; onResize?: () => void }) => void } | undefined;
   public helpReference = "https://triply.cc/docs/yasgui#table";
   public label = "Table";
   public priority = 10;
@@ -115,24 +116,15 @@ export default class Table implements Plugin<PluginConfig> {
     } else {
       content = `<span class='nonIri'>${this.formatLiteral(binding, prefixes, options)}</span>`;
     }
-    return `<div>${content}</div>`;
+
+    return `<div${!options || options.ellipse ? "" : ' class="unellipsed"'}>${content}</div>`;
   }
   private formatLiteral(
     literalBinding: Parser.BindingValue,
     prefixes?: { [key: string]: string },
     options?: { ellipse?: boolean }
   ) {
-    let stringRepresentation = literalBinding.value;
-    const shouldEllipse = options?.ellipse ?? true;
-    // make sure we don't do an ellipsis for just one character
-    if (shouldEllipse && stringRepresentation.length > this.config.ellipseLength + 1) {
-      const ellipseSize = this.config.ellipseLength / 2;
-      stringRepresentation = `${escape(
-        stringRepresentation.slice(0, ellipseSize)
-      )}<a class="tableEllipse" title="Click to expand">…</a>${escape(stringRepresentation.slice(-1 * ellipseSize))}`;
-    } else {
-      stringRepresentation = escape(stringRepresentation);
-    }
+    let stringRepresentation = escape(literalBinding.value);
     // Return now when in compact mode.
     if (this.persistentConfig.compact) return stringRepresentation;
 
@@ -174,24 +166,6 @@ export default class Table implements Plugin<PluginConfig> {
             }
             return this.getCellContent(data, prefixes);
           },
-          createdCell: (cell: Node, cellData: Parser.BindingValue | "", _rowData: any, row: number, col: number) => {
-            // Do nothing on empty cells
-            if (cellData === "") return;
-            // Ellipsis is only applied on literals variants
-            if (cellData.type === "literal" || cellData.type === "typed-literal") {
-              const ellipseEl = (cell as HTMLTableDataCellElement).querySelector(".tableEllipse");
-              if (ellipseEl)
-                ellipseEl.addEventListener("click", () => {
-                  this.expandedCells[`${row}-${col}`] = true;
-                  // Disable the resizer as it messes with the initial drawing
-                  this.tableResizer?.reset({ disable: true });
-                  // Make the table redraw the cell
-                  this.dataTable?.cell(row, col).invalidate();
-                  // Signal the table to redraw the width of the table
-                  this.dataTable?.columns.adjust();
-                });
-            }
-          },
         };
       }),
     ];
@@ -203,7 +177,7 @@ export default class Table implements Plugin<PluginConfig> {
 
   public draw(persistentConfig: PersistentConfig) {
     this.persistentConfig = { ...this.persistentConfig, ...persistentConfig };
-    const table = document.createElement("table");
+    this.tableEl = document.createElement("table");
     const rows = this.getRows();
     const columns = this.getColumns();
     this.expandedCells = {};
@@ -216,13 +190,13 @@ export default class Table implements Plugin<PluginConfig> {
 
     if (this.dataTable) {
       // Resizer needs to be disabled otherwise it will mess with the new table's width
-      this.tableResizer?.reset({ disable: true });
+      this.disableResizer();
       this.tableResizer = undefined;
 
       this.dataTable.destroy(true);
       this.dataTable = undefined;
     }
-    this.yasr.resultsEl.appendChild(table);
+    this.yasr.resultsEl.appendChild(this.tableEl);
     // reset some default config properties as they couldn't be initialized beforehand
     const dtConfig: DataTables.Settings = {
       ...((cloneDeep(this.config.tableConfig) as unknown) as DataTables.Settings),
@@ -230,17 +204,73 @@ export default class Table implements Plugin<PluginConfig> {
       data: rows,
       columns: columns,
     };
-    this.dataTable = $(table).DataTable(dtConfig);
-    table.style.width = "unset";
-    this.tableResizer = new ColumnResizer.default(table, {
+    this.dataTable = $(this.tableEl).DataTable(dtConfig);
+    this.tableEl.style.removeProperty("width");
+    this.tableEl.style.width = this.tableEl.clientWidth + "px";
+    this.tableResizer = new ColumnResizer.default(this.tableEl, {
       widths: this.persistentConfig.compact === true ? [] : [this.getSizeFirstColumn()],
       partialRefresh: true,
+      onResize: this.setEllipsisHandlers,
     });
-    // Expanding an ellipsis disables the resizing, wait for the signal to re-enable it again
-    this.dataTable.on("column-sizing", () => this.enableResizer());
-    this.drawControls();
-  }
+    // DataTables uses the rendered style to decide the widths of columns.
+    // Before a draw remove the ellipseTable styling
+    this.dataTable.on("preDraw", () => {
+      this.disableResizer();
+      removeClass(this.tableEl, "ellipseTable");
+      this.tableEl?.style.removeProperty("width");
+      this.tableEl?.style.setProperty("width", this.tableEl.clientWidth + "px");
+      return true; // Indicate it should re-render
+    });
+    // After a draw
+    this.dataTable.on("draw", () => {
+      if (!this.tableEl) return;
+      // Width of table after render, removing width will make it fall back to 100%
+      let targetSize = this.tableEl.clientWidth;
+      this.tableEl.style.removeProperty("width");
+      // Let's make sure the new size is not bigger
+      if (targetSize > this.tableEl.clientWidth) targetSize = this.tableEl.clientWidth;
+      this.tableEl?.style.setProperty("width", `${targetSize}px`);
+      // Enable the re-sizer
+      this.enableResizer();
+      // Re-add the ellipsis
+      addClass(this.tableEl, "ellipseTable");
+      // Check if cells need the ellipsisHandlers
+      this.setEllipsisHandlers();
+    });
 
+    this.drawControls();
+    // Draw again but with the events
+    addClass(this.tableEl, "ellipseTable");
+    this.setEllipsisHandlers();
+    // if (this.tableEl.clientWidth > width) this.tableEl.parentElement?.style.setProperty("overflow", "hidden");
+  }
+  private onExpand = (row: number, col: number) => {
+    this.expandedCells[`${row}-${col}`] = true;
+    // Force re-draw of this cell
+    this.dataTable?.cell(row, col).invalidate();
+  };
+
+  private setEllipsisHandlers = () => {
+    this.dataTable?.cells({ page: "current" }).every((rowIdx, colIdx) => {
+      const cell = this.dataTable?.cell(rowIdx, colIdx);
+      if (cell) {
+        if (cell.data() === "") return;
+        const cellNode = cell.node() as HTMLTableCellElement;
+        if (cellNode) {
+          const content = cellNode.firstChild as HTMLDivElement;
+          if (content.scrollWidth > content.clientWidth) {
+            if (!content.classList.contains("ellipsable")) {
+              addClass(content, "ellipsable");
+              content.addEventListener("click", () => this.onExpand(rowIdx, colIdx));
+            }
+          } else {
+            removeClass(content, "ellipsable");
+            content.removeEventListener("click", () => this.onExpand(rowIdx, colIdx));
+          }
+        }
+      }
+    });
+  };
   private handleTableSearch = (event: KeyboardEvent) => {
     this.dataTable?.search((event.target as HTMLInputElement).value).draw();
   };
@@ -256,8 +286,14 @@ export default class Table implements Plugin<PluginConfig> {
     // Store in persistentConfig
     this.persistentConfig.compact = (event.target as HTMLInputElement).checked;
     // Update the table
+    if (this.dataTable) {
+      removeClass(this.tableEl, "ellipseTable");
+      this.disableResizer();
+      this.dataTable.column(0).visible(!this.persistentConfig.compact);
+      this.dataTable.cells({ page: "current" }).invalidate();
+      this.dataTable.draw("page");
+    }
     this.yasr.storePluginConfig("table", this.persistentConfig);
-    this.draw(this.persistentConfig);
   };
   /**
    * Draws controls on each update
@@ -346,13 +382,16 @@ export default class Table implements Plugin<PluginConfig> {
     this.tableControls?.remove();
   }
   private enableResizer() {
-    this.tableResizer?.reset({ disable: false });
+    this.tableResizer?.reset({ disable: false, onResize: this.setEllipsisHandlers });
+  }
+  private disableResizer() {
+    this.tableResizer?.reset({ disable: true });
   }
   destroy() {
     this.removeControls();
     this.tableResizer?.reset({ disable: true });
     this.tableResizer = undefined;
-    this.dataTable?.off("column-sizing", () => this.enableResizer());
+    // According to datatables docs, destroy(true) will also remove all events
     this.dataTable?.destroy(true);
     this.dataTable = undefined;
     removeClass(this.yasr.rootEl, "isSinglePage");

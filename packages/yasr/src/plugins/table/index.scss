@@ -29,12 +29,38 @@ Delimiters used by datatables
       margin-right: 10px;
     }
   }
+  .dataTable.ellipseTable {
+    white-space: nowrap;
+    div:not(.unellipsed) {
+      overflow: hidden;
+      text-overflow: ellipsis;
+    }
+  }
+  .dataTable:not(.ellipseTable) {
+    div:not(.unellipsed) {
+      word-break: break-all;
+    }
+  }
+  .unellipsed {
+    white-space: normal;
+    word-break: break-all;
+  }
+  .ellipsable {
+    cursor: pointer;
+    * {
+      pointer-events: none;
+    }
+  }
 
   .dataTables_wrapper {
+    font-size: 0.9em;
+    min-width: 100%;
+    .grip-container {
+      max-width: 100%;
+    }
     .dataTable {
       min-width: 100%;
       box-sizing: border-box;
-
       // Override border-bottom datatables styling
       &.no-footer {
         border-bottom: none;
@@ -74,21 +100,22 @@ Delimiters used by datatables
         text-align: start;
         overflow: hidden;
         border: none;
-        padding: 8px 10px;
-        padding-right: 16px;
+        padding: 5px;
+        padding-left: 7px;
         &:hover {
           background-color: #f9f9f9;
         }
       }
 
       td {
+        padding: 0;
         & > div {
           padding: 5px;
           padding-left: 7px;
-          word-break: break-all;
           hyphens: auto;
           &.rowNumber {
             word-break: keep-all;
+            overflow: visible;
           }
         }
         .tableEllipse {
